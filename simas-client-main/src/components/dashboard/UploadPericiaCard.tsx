@@ -62,10 +62,12 @@ export function UploadPericiaCard({ onSuccess }: UploadPericiaCardProps) {
     const files = e.dataTransfer.files;
     if (files.length > 0) {
       const file = files[0];
-      if (file.type === "application/pdf") {
-        setSelectedFile(file);
-      } else {
+      if (file.type !== "application/pdf") {
         showWarningToast("Formato inválido", "Apenas arquivos PDF são aceitos");
+      } else if (file.size > 10 * 1024 * 1024) {
+        showWarningToast("Arquivo muito grande", "O PDF deve ter no máximo 10 MB");
+      } else {
+        setSelectedFile(file);
       }
     }
   }, []);
@@ -74,10 +76,12 @@ export function UploadPericiaCard({ onSuccess }: UploadPericiaCardProps) {
     const files = e.target.files;
     if (files && files.length > 0) {
       const file = files[0];
-      if (file.type === "application/pdf") {
-        setSelectedFile(file);
-      } else {
+      if (file.type !== "application/pdf") {
         showWarningToast("Formato inválido", "Apenas arquivos PDF são aceitos");
+      } else if (file.size > 10 * 1024 * 1024) {
+        showWarningToast("Arquivo muito grande", "O PDF deve ter no máximo 10 MB");
+      } else {
+        setSelectedFile(file);
       }
     }
   }, []);

@@ -43,7 +43,7 @@ Equipe Administrativa - ${empresa}`;
           <div className="bg-[#075E54] text-white px-4 py-3 flex items-center gap-3">
             {/* Avatar */}
             <div className="w-10 h-10 rounded-full bg-gray-400 flex items-center justify-center overflow-hidden flex-shrink-0">
-              {profileImageUrl ? (
+              {profileImageUrl && profileImageUrl.startsWith('https://') ? (
                 <img src={profileImageUrl} alt="" className="w-full h-full object-cover" />
               ) : (
                 <User className="h-5 w-5 text-white" />
