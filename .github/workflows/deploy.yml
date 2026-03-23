@@ -1,0 +1,171 @@
+name: CI/CD — SIMAS Frontend
+
+on:
+  push:
+    branches: [main]
+    paths: ['simas-client-main/**']
+  pull_request:
+    branches: [main]
+    paths: ['simas-client-main/**']
+
+env:
+  PROJECT_ID: tribal-pillar-476701-a3
+  REGION: southamerica-east1
+  SERVICE: simas-frontend
+  IMAGE: gcr.io/tribal-pillar-476701-a3/simas-frontend
+  BACKEND_URL: https://simas-webpage-oh6s7bvufq-rj.a.run.app
+
+jobs:
+  # ── CI: lint + build (runs on PR and push) ──────────────────────────────────
+  ci:
+    name: Lint & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: simas-client-main
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: simas-client-main/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_API_BASE_URL: ${{ env.BACKEND_URL }}
+
+  # ── CD: deploy (runs only on push to main) ──────────────────────────────────
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker --quiet
+
+      - name: Build & push Docker image
+        working-directory: simas-client-main
+        run: |
+          IMAGE_TAG=${{ env.IMAGE }}:${{ github.sha }}
+          docker build \
+            --build-arg VITE_API_BASE_URL=${{ env.BACKEND_URL }} \
+            -t $IMAGE_TAG \
+            -t ${{ env.IMAGE }}:latest \
+            .
+          docker push $IMAGE_TAG
+          docker push ${{ env.IMAGE }}:latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE }} \
+            --image ${{ env.IMAGE }}:${{ github.sha }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --memory 256Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 5 \
+            --quiet
+
+      - name: Get deployed URL
+        id: url
+        run: |
+          URL=$(gcloud run services describe ${{ env.SERVICE }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --format 'value(status.url)')
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "Deployed to: $URL"
+
+  # ── Smoke tests (runs after deploy) ─────────────────────────────────────────
+  smoke-tests:
+    name: Post-Deploy Smoke Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Wait for service to stabilize
+        run: sleep 10
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Get frontend URL
+        id: urls
+        run: |
+          FRONTEND=$(gcloud run services describe simas-frontend \
+            --region ${{ env.REGION }} --project ${{ env.PROJECT_ID }} \
+            --format 'value(status.url)')
+          echo "frontend=$FRONTEND" >> $GITHUB_OUTPUT
+
+      - name: Test — Frontend serves HTML
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.urls.outputs.frontend }}/")
+          echo "Frontend root: $STATUS"
+          [ "$STATUS" = "200" ] || (echo "FAIL: expected 200, got $STATUS" && exit 1)
+
+      - name: Test — Frontend SPA routing (non-root path returns 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.urls.outputs.frontend }}/dashboard")
+          echo "Frontend /dashboard: $STATUS"
+          [ "$STATUS" = "200" ] || (echo "FAIL: SPA routing broken, got $STATUS" && exit 1)
+
+      - name: Test — Backend health
+        run: |
+          RESP=$(curl -s "${{ env.BACKEND_URL }}/health")
+          echo "Health: $RESP"
+          echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['status']=='ok'" \
+            || (echo "FAIL: backend health check failed" && exit 1)
+
+      - name: Test — Auth endpoint rejects bad credentials (401)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ env.BACKEND_URL }}/auth/login" \
+            -H "Content-Type: application/json" \
+            -H "ngrok-skip-browser-warning: true" \
+            -d '{"email":"smoke-test@invalid.test","password":"wrongpassword"}')
+          echo "Auth with bad creds: $STATUS"
+          [ "$STATUS" = "401" ] || [ "$STATUS" = "422" ] \
+            || (echo "FAIL: expected 401/422, got $STATUS" && exit 1)
+
+      - name: Test — Dashboard requires auth (401)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "ngrok-skip-browser-warning: true" \
+            "${{ env.BACKEND_URL }}/dashboard")
+          echo "Dashboard without token: $STATUS"
+          [ "$STATUS" = "401" ] || (echo "FAIL: expected 401, got $STATUS" && exit 1)
+
+      - name: All smoke tests passed
+        run: echo "✓ Frontend live, backend healthy, auth protected"
